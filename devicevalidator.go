@@ -1,3 +1,5 @@
+// Package devicevalidator provides device validation middleware for Caddy
+// Repository: github.com/Juijote/Caddy-Device-Validator
 package devicevalidator
 
 import (
@@ -14,6 +16,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"go.uber.org/zap"
 )
 
 func init() {
@@ -21,7 +24,7 @@ func init() {
 	httpcaddyfile.RegisterHandlerDirective("device_validator", parseCaddyfile)
 }
 
-// DeviceValidator 实现设备验证中间件 
+// DeviceValidator 实现设备验证中间件
 type DeviceValidator struct {
 	// 配置项
 	Enable          bool     `json:"enable,omitempty"`
@@ -34,7 +37,7 @@ type DeviceValidator struct {
 	// 运行时数据
 	tokens     map[string]*tokenData
 	tokensLock sync.RWMutex
-	logger     *caddy.Logger
+	logger     *zap.Logger
 
 	// 编译后的正则
 	mobileRegex  *regexp.Regexp
@@ -57,7 +60,7 @@ func (DeviceValidator) CaddyModule() caddy.ModuleInfo {
 
 // Provision 初始化模块
 func (dv *DeviceValidator) Provision(ctx caddy.Context) error {
-	dv.logger = ctx.Logger(dv)
+	dv.logger = ctx.Logger()
 	dv.tokens = make(map[string]*tokenData)
 
 	// 设置默认值
@@ -131,8 +134,8 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 		// 如果声称是移动设备但 Client Hints 说不是
 		if secChUaMobile == "?0" {
 			dv.logger.Info("detected fake mobile device via Client Hints",
-				"ua", userAgent,
-				"sec-ch-ua-mobile", secChUaMobile)
+				zap.String("ua", userAgent),
+				zap.String("sec-ch-ua-mobile", secChUaMobile))
 			return true
 		}
 
@@ -143,8 +146,8 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 				strings.Contains(platformLower, "macos") ||
 				strings.Contains(platformLower, "linux")) && isMobileUA {
 				dv.logger.Info("detected desktop platform with mobile UA",
-					"ua", userAgent,
-					"platform", secChUaPlatform)
+					zap.String("ua", userAgent),
+					zap.String("platform", secChUaPlatform))
 				return true
 			}
 		}
@@ -156,8 +159,8 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 		fmt.Sscanf(cookie.Value, "%d", &width)
 		if width > 768 && isMobileUA {
 			dv.logger.Info("detected large screen with mobile UA",
-				"ua", userAgent,
-				"screen_width", width)
+				zap.String("ua", userAgent),
+				zap.Int("screen_width", width))
 			return true
 		}
 	}
