@@ -34,7 +34,6 @@ type DeviceValidator struct {
 	TokenExpiry       int      `json:"token_expiry,omitempty"`
 	ExcludePaths      []string `json:"exclude_paths,omitempty"`
 	CustomMessage     string   `json:"custom_message,omitempty"`
-	ShowReason        bool     `json:"show_reason,omitempty"`
 
 	tokens     map[string]*tokenData
 	tokensLock sync.RWMutex
@@ -118,7 +117,12 @@ func (dv *DeviceValidator) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 		return next.ServeHTTP(w, r)
 	}
 
-	if dv.ForceVerification || dv.isSuspiciousDevice(r) {
+	if dv.ForceVerification {
+		dv.serveValidationPage(w, r)
+		return nil
+	}
+
+	if dv.isSuspiciousDevice(r) {
 		dv.serveValidationPage(w, r)
 		return nil
 	}
@@ -145,7 +149,6 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 		return true
 	}
 
-	// 移动 UA + 触控点 <=1 被认为可疑（前端 JS 检测）
 	return false
 }
 
@@ -163,119 +166,78 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>设备验证</title>
 <style>
-:root {
-  --primary-color: rgba(128, 255, 128, 0.8);
-  --text-shadow-color: rgba(51, 255, 51, 0.4);
-  --background-start: #11581E;
-  --background-end: #041607;
-  --overlay-color: rgba(32, 128, 32, 0.8);
-  --animation-duration: 7.5s;
-  --font-size-base: 16px;
-  --font-size-large: 2rem;
-  --spacing-base: 1rem;
-}
 body {
-  margin: 0;
-  height: 100vh;
-  font-family: system-ui, -apple-system, sans-serif;
-  font-size: var(--font-size-large);
-  color: var(--primary-color);
-  text-shadow: 0 0 1ex #33ff33, 0 0 2px rgba(255,255,255,0.8);
-  background: radial-gradient(var(--background-start), var(--background-end));
-  overflow: hidden;
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+	background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 100vh;
 }
-.noise {
-  position: fixed;
-  top:0; left:0; width:100%; height:100%;
-  background: repeating-radial-gradient(#000 0 0.0001%, #fff 0 0.0002%) 50% 0/2500px 2500px,
-              repeating-conic-gradient(#000 0 0.0001%, #fff 0 0.0002%) 50% 50%/2500px 2500px;
-  background-blend-mode: difference;
-  animation: noise 0.2s infinite alternate;
-  opacity:0.05;
-  pointer-events:none;
-  z-index:-1;
+.container {
+	background: white;
+	padding: 40px;
+	border-radius: 20px;
+	box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+	text-align: center;
 }
-.overlay {
-  pointer-events:none;
-  position: fixed;
-  width:100%; height:100%;
-  background: repeating-linear-gradient(180deg, rgba(0,0,0,0) 0, rgba(0,0,0,0.3) 50%, rgba(0,0,0,0) 100%);
-  background-size:auto 4px;
-  z-index:1;
+.spinner {
+	border: 4px solid #f3f3f3;
+	border-top: 4px solid #667eea;
+	border-radius: 50%%;
+	width: 50px;
+	height: 50px;
+	animation: spin 1s linear infinite;
+	margin: 20px auto;
 }
-.overlay::before {
-  content:"";
-  pointer-events:none;
-  position:absolute;
-  inset:0;
-  background-image: linear-gradient(0deg, transparent 0%, var(--overlay-color) 2%, var(--overlay-color) 3%, transparent 100%);
-  background-repeat:no-repeat;
-  animation: scan var(--animation-duration) linear infinite;
+@keyframes spin {
+	0%% { transform: rotate(0deg); }
+	100%% { transform: rotate(360deg); }
 }
-.terminal {
-  position: relative;
-  max-width: 800px;
-  margin: 0 auto;
-  padding: calc(var(--spacing-base)*4);
-}
-.output {
-  margin: var(--spacing-base) 0;
-  line-height:1.5;
-}
-.output::before { content: "> "; color: var(--primary-color); }
-.errorcode {
-  color:white;
-  font-size: calc(var(--font-size-large)*1.5);
-  font-weight:bold;
-}
-@keyframes scan {
-  0% { background-position: 0 -100vh; }
-  35%,100% { background-position: 0 100vh; }
-}
-@keyframes noise { 0% {transform:translate(0,0);} 100%{transform:translate(1px,1px);} }
 </style>
 </head>
 <body>
-  <div class="noise" aria-hidden="true"></div>
-  <div class="overlay" aria-hidden="true"></div>
-  <main class="terminal">
-    <div class="error-container" role="alert" aria-live="polite">
-      <h1><span class="errorcode">%s</span></h1>
-      <div class="output" id="reason" style="display:none;"></div>
-    </div>
-  </main>
+<div class="container">
+<h2>正在验证设备</h2>
+<div class="spinner"></div>
+<p>请稍候...</p>
+<div id="debug" style="display:none;"></div>
+</div>
 <script>
 (function() {
 	let isSuspicious = false;
 	let reasons = [];
+
 	const info = {
 		ua: navigator.userAgent,
+		hasTouch: 'ontouchstart' in window || navigator.maxTouchPoints > 0,
 		maxTouchPoints: navigator.maxTouchPoints || 0
 	};
+
+	// 模拟移动设备但无触控能力 → 伪造
 	if (/Mobile|Android|iPhone|iPad/i.test(info.ua) && info.maxTouchPoints <= 1) {
 		isSuspicious = true;
 		reasons.push('移动 UA 但触控点 ≤ 1，疑似 F12 模拟设备');
 	}
+
+	// 无头浏览器检测
 	if (navigator.webdriver === true) {
 		isSuspicious = true;
 		reasons.push('检测到 WebDriver 环境');
 	}
+
 	if (isSuspicious) {
-		const reasonDiv = document.getElementById('reason');
-		if (%t) {
-			reasonDiv.style.display = 'block';
-			reasonDiv.textContent = '原因: ' + reasons.join(', ');
-		}
+		document.body.innerHTML = '<div class="container"><h2>异常请求</h2><p>%s</p></div>';
 	} else {
-		document.cookie = 'device_verified=1; path=/; max-age=%d; SameSite=Lax';
+		document.cookie = 'device_verified=1; path=/; max-age=300; SameSite=Lax';
 		const url = new URL(window.location.href);
-		url.searchParams.set('_vt','%s');
-		setTimeout(()=>{window.location.href=url.toString();},500);
+		url.searchParams.set('_vt', '%s');
+		setTimeout(() => { window.location.href = url.toString(); }, 500);
 	}
 })();
 </script>
 </body>
-</html>`, message, dv.ShowReason, dv.TokenExpiry, token)
+</html>`, message, token)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -296,7 +258,10 @@ func (dv *DeviceValidator) isValidToken(token, ip string) bool {
 	dv.tokensLock.RLock()
 	defer dv.tokensLock.RUnlock()
 	data, exists := dv.tokens[token]
-	if !exists || time.Since(data.CreatedAt).Seconds() > float64(dv.TokenExpiry) {
+	if !exists {
+		return false
+	}
+	if time.Since(data.CreatedAt).Seconds() > float64(dv.TokenExpiry) {
 		return false
 	}
 	if strings.Split(data.IP, ":")[0] != strings.Split(ip, ":")[0] {
@@ -334,31 +299,50 @@ func (dv *DeviceValidator) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		for d.NextBlock(0) {
 			switch d.Val() {
 			case "enable":
-				if !d.NextArg() { return d.ArgErr() }
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
 				dv.Enable = d.Val() == "true"
+
 			case "check_fake_mobile":
-				if !d.NextArg() { return d.ArgErr() }
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
 				dv.CheckFakeMobile = d.Val() == "true"
+
 			case "check_headless":
-				if !d.NextArg() { return d.ArgErr() }
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
 				dv.CheckHeadless = d.Val() == "true"
+
 			case "force_verification":
-				if !d.NextArg() { return d.ArgErr() }
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
 				dv.ForceVerification = d.Val() == "true"
+
 			case "debug_mode":
-				if !d.NextArg() { return d.ArgErr() }
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
 				dv.DebugMode = d.Val() == "true"
+
 			case "token_expiry":
-				if !d.NextArg() { return d.ArgErr() }
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
 				fmt.Sscanf(d.Val(), "%d", &dv.TokenExpiry)
+
 			case "exclude_paths":
 				dv.ExcludePaths = d.RemainingArgs()
+
 			case "custom_message":
-				if !d.NextArg() { return d.ArgErr() }
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
 				dv.CustomMessage = d.Val()
-			case "show_reason":
-				if !d.NextArg() { return d.ArgErr() }
-				dv.ShowReason = d.Val() == "true"
+
 			default:
 				return d.Errf("unknown subdirective: %s", d.Val())
 			}
