@@ -153,12 +153,7 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
 	token := dv.generateToken(r.RemoteAddr)
 	message := dv.CustomMessage
 	if message == "" {
-		message = "检测到异常设备特征，请使用真实设备访问"
-	}
-
-	showReason := "false"
-	if dv.ShowReason {
-		showReason = "true"
+		message = "异常请求"
 	}
 
 	html := fmt.Sprintf(`<!DOCTYPE html>
@@ -167,7 +162,6 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>设备验证</title>
-
 <style>
 :root {
   --primary-color: rgba(128, 255, 128, 0.8);
@@ -180,7 +174,6 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
   --font-size-large: 2rem;
   --spacing-base: 1rem;
 }
-
 body {
   margin: 0;
   height: 100vh;
@@ -191,7 +184,6 @@ body {
   background: radial-gradient(var(--background-start), var(--background-end));
   overflow: hidden;
 }
-
 .noise {
   position: fixed;
   top:0; left:0; width:100%; height:100%;
@@ -203,7 +195,6 @@ body {
   pointer-events:none;
   z-index:-1;
 }
-
 .overlay {
   pointer-events:none;
   position: fixed;
@@ -221,27 +212,22 @@ body {
   background-repeat:no-repeat;
   animation: scan var(--animation-duration) linear infinite;
 }
-
 .terminal {
   position: relative;
   max-width: 800px;
   margin: 0 auto;
   padding: calc(var(--spacing-base)*4);
 }
-
 .output {
   margin: var(--spacing-base) 0;
   line-height:1.5;
 }
-
 .output::before { content: "> "; color: var(--primary-color); }
-
 .errorcode {
   color:white;
   font-size: calc(var(--font-size-large)*1.5);
   font-weight:bold;
 }
-
 @keyframes scan {
   0% { background-position: 0 -100vh; }
   35%,100% { background-position: 0 100vh; }
@@ -258,17 +244,14 @@ body {
       <div class="output" id="reason" style="display:none;"></div>
     </div>
   </main>
-
 <script>
 (function() {
 	let isSuspicious = false;
 	let reasons = [];
-
 	const info = {
 		ua: navigator.userAgent,
 		maxTouchPoints: navigator.maxTouchPoints || 0
 	};
-
 	if (/Mobile|Android|iPhone|iPad/i.test(info.ua) && info.maxTouchPoints <= 1) {
 		isSuspicious = true;
 		reasons.push('移动 UA 但触控点 ≤ 1，疑似 F12 模拟设备');
@@ -277,15 +260,14 @@ body {
 		isSuspicious = true;
 		reasons.push('检测到 WebDriver 环境');
 	}
-
 	if (isSuspicious) {
 		const reasonDiv = document.getElementById('reason');
-		if (%s) {
+		if (%t) {
 			reasonDiv.style.display = 'block';
 			reasonDiv.textContent = '原因: ' + reasons.join(', ');
 		}
 	} else {
-		document.cookie = 'device_verified=1; path=/; max-age=300; SameSite=Lax';
+		document.cookie = 'device_verified=1; path=/; max-age=%d; SameSite=Lax';
 		const url = new URL(window.location.href);
 		url.searchParams.set('_vt','%s');
 		setTimeout(()=>{window.location.href=url.toString();},500);
@@ -293,8 +275,7 @@ body {
 })();
 </script>
 </body>
-</html>
-`, message, showReason, token)
+</html>`, message, dv.ShowReason, dv.TokenExpiry, token)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
