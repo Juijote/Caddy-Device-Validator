@@ -27,13 +27,14 @@ func init() {
 // DeviceValidator 实现设备验证中间件
 type DeviceValidator struct {
 	// 配置项
-	Enable           bool     `json:"enable,omitempty"`
-	CheckDevTools    bool     `json:"check_devtools,omitempty"`
-	CheckFakeMobile  bool     `json:"check_fake_mobile,omitempty"`
-	ForceVerification bool     `json:"force_verification,omitempty"` // 强制所有请求先验证
-	TokenExpiry      int      `json:"token_expiry,omitempty"`        // 秒
-	ExcludePaths     []string `json:"exclude_paths,omitempty"`
-	CustomMessage    string   `json:"custom_message,omitempty"`
+	Enable            bool     `json:"enable,omitempty"`
+	CheckDevTools     bool     `json:"check_devtools,omitempty"`
+	CheckFakeMobile   bool     `json:"check_fake_mobile,omitempty"`
+	CheckHeadless     bool     `json:"check_headless,omitempty"`      // 检测无头浏览器
+	ForceVerification bool     `json:"force_verification,omitempty"`  // 强制所有请求先验证
+	TokenExpiry       int      `json:"token_expiry,omitempty"`        // 秒
+	ExcludePaths      []string `json:"exclude_paths,omitempty"`
+	CustomMessage     string   `json:"custom_message,omitempty"`
 
 	// 运行时数据
 	tokens     map[string]*tokenData
@@ -107,12 +108,10 @@ func (dv *DeviceValidator) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 
 	// 如果开启强制验证模式,所有请求都需要验证
 	if dv.ForceVerification {
-		// 检查是否有验证 cookie
 		cookie, err := r.Cookie("device_verified")
 		if err != nil || cookie.Value != "1" {
-			dv.logger.Info("force verification mode, showing validation page",
-				zap.String("path", r.URL.Path),
-				zap.String("ua", r.Header.Get("User-Agent")))
+			dv.logger.Info("force verification mode",
+				zap.String("path", r.URL.Path))
 			dv.serveValidationPage(w, r)
 			return nil
 		}
@@ -120,7 +119,6 @@ func (dv *DeviceValidator) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 
 	// 检查设备是否可疑
 	if dv.isSuspiciousDevice(r) {
-		// 返回验证页面
 		dv.serveValidationPage(w, r)
 		return nil
 	}
@@ -136,12 +134,24 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 	// 检查是否为移动设备 UA
 	isMobileUA := dv.mobileRegex.MatchString(userAgent)
 
-	if !isMobileUA && !dv.CheckDevTools {
-		// 如果不是移动设备 UA,且不检测 DevTools,直接返回
-		return false
+	// 检查是否为无头浏览器特征
+	if dv.CheckHeadless {
+		// HeadlessChrome UA 检测
+		if strings.Contains(userAgent, "HeadlessChrome") {
+			dv.logger.Info("detected HeadlessChrome UA",
+				zap.String("ua", userAgent))
+			return true
+		}
+
+		// PhantomJS UA 检测
+		if strings.Contains(userAgent, "PhantomJS") || strings.Contains(userAgent, "Phantom") {
+			dv.logger.Info("detected PhantomJS UA",
+				zap.String("ua", userAgent))
+			return true
+		}
 	}
 
-	// 如果是移动设备 UA,强制显示验证页面让 JS 检测
+	// 如果是移动设备 UA 且开启了伪造检测
 	if dv.CheckFakeMobile && isMobileUA {
 		// 检查是否已经通过验证
 		cookie, err := r.Cookie("device_verified")
@@ -151,57 +161,25 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 				var width int
 				fmt.Sscanf(widthCookie.Value, "%d", &width)
 				if width <= 768 {
-					// 屏幕宽度正常,放行
 					return false
 				}
 			} else {
-				// 有验证 cookie 但没有屏幕宽度,放行(可能是第一次)
 				return false
 			}
 		}
-		
-		// 需要验证
+
 		dv.logger.Info("mobile UA detected, need verification",
 			zap.String("ua", userAgent))
 		return true
 	}
 
-	// 如果开启了 DevTools 检测,所有请求都需要验证
+	// 如果开启了 DevTools 检测
 	if dv.CheckDevTools {
 		cookie, err := r.Cookie("device_verified")
 		if err == nil && cookie.Value == "1" {
 			return false
 		}
-		dv.logger.Info("devtools check enabled, need verification",
-			zap.String("ua", userAgent))
 		return true
-	}
-
-	// 检查 Client Hints (现代浏览器支持)
-	if dv.CheckFakeMobile {
-		secChUaMobile := r.Header.Get("Sec-CH-UA-Mobile")
-		secChUaPlatform := r.Header.Get("Sec-CH-UA-Platform")
-
-		// 如果声称是移动设备但 Client Hints 说不是
-		if secChUaMobile == "?0" && isMobileUA {
-			dv.logger.Info("detected fake mobile device via Client Hints",
-				zap.String("ua", userAgent),
-				zap.String("sec-ch-ua-mobile", secChUaMobile))
-			return true
-		}
-
-		// 桌面平台但有移动 UA
-		if secChUaPlatform != "" {
-			platformLower := strings.ToLower(secChUaPlatform)
-			if (strings.Contains(platformLower, "windows") ||
-				strings.Contains(platformLower, "macos") ||
-				strings.Contains(platformLower, "linux")) && isMobileUA {
-				dv.logger.Info("detected desktop platform with mobile UA",
-					zap.String("ua", userAgent),
-					zap.String("platform", secChUaPlatform))
-				return true
-			}
-		}
 	}
 
 	return false
@@ -271,6 +249,16 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
             margin-top: 20px;
         }
         .icon { font-size: 48px; margin-bottom: 20px; }
+        .debug { 
+            margin-top: 20px; 
+            padding: 10px; 
+            background: #f5f5f5; 
+            border-radius: 5px;
+            font-size: 12px;
+            color: #666;
+            text-align: left;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -279,10 +267,15 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
         <h2>正在验证设备</h2>
         <div class="spinner"></div>
         <p class="loading">请稍候...</p>
+        <div class="debug" id="debug"></div>
     </div>
     
     <script>
         (function() {
+            const checks = {};
+            let isSuspicious = false;
+            let reasons = [];
+            
             // 收集设备信息
             const deviceInfo = {
                 screenWidth: window.screen.width,
@@ -291,40 +284,40 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
                 innerHeight: window.innerHeight,
                 outerWidth: window.outerWidth,
                 outerHeight: window.outerHeight,
+                availWidth: window.screen.availWidth,
+                availHeight: window.screen.availHeight,
                 hasTouch: 'ontouchstart' in window || navigator.maxTouchPoints > 0,
                 maxTouchPoints: navigator.maxTouchPoints || 0,
                 devicePixelRatio: window.devicePixelRatio,
-                orientation: screen.orientation?.type || 'unknown'
+                platform: navigator.platform,
+                userAgent: navigator.userAgent
             };
             
-            let isSuspicious = false;
-            let reason = '';
-            
-            // 检测 DevTools (多种方法)
+            // === 1. DevTools 检测(只在真正打开时才触发) ===
             %s
             
-            // 检测是否为伪造的移动设备
-            const isMobileUA = /Mobile|Android|iPhone|iPad/i.test(navigator.userAgent);
-            const hasSmallScreen = deviceInfo.screenWidth <= 768;
-            const isFakeMobile = isMobileUA && !deviceInfo.hasTouch && !hasSmallScreen;
+            // === 2. 伪造移动设备检测 ===
+            %s
             
-            if (isFakeMobile) {
-                isSuspicious = true;
-                reason = '移动设备UA但无触摸支持且屏幕较大';
-            }
+            // === 3. 无头浏览器检测 ===
+            %s
+            
+            // 显示调试信息(开发时使用)
+            // document.getElementById('debug').style.display = 'block';
+            // document.getElementById('debug').innerHTML = '<strong>检测结果:</strong><br>' + 
+            //     JSON.stringify({isSuspicious, reasons, deviceInfo}, null, 2);
             
             if (isSuspicious) {
                 document.querySelector('.container').innerHTML = 
                     '<div class="icon">⛔</div>' +
                     '<h2 class="denied">访问被拒绝</h2>' +
                     '<p class="denied">%s</p>' +
-                    '<p style="color: #999; font-size: 12px; margin-top: 20px;">原因: ' + reason + '</p>';
+                    '<p style="color: #999; font-size: 12px; margin-top: 20px;">原因: ' + reasons.join(', ') + '</p>';
             } else {
                 // 设置 cookie 并重定向
                 document.cookie = 'screen_width=' + deviceInfo.screenWidth + '; path=/; max-age=300; SameSite=Lax';
                 document.cookie = 'device_verified=1; path=/; max-age=300; SameSite=Lax';
                 
-                // 添加验证参数后重定向
                 const url = new URL(window.location.href);
                 url.searchParams.set('_vt', '%s');
                 
@@ -335,77 +328,179 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
         })();
     </script>
 </body>
-</html>`, dv.getDevToolsDetectionJS(), message, token)
+</html>`, 
+		dv.getDevToolsDetectionJS(), 
+		dv.getFakeMobileDetectionJS(),
+		dv.getHeadlessDetectionJS(),
+		message, 
+		token)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(html))
 }
 
-// getDevToolsDetectionJS 返回 DevTools 检测 JS 代码
+// getDevToolsDetectionJS 返回 DevTools 检测 JS 代码(只在真正打开时触发)
 func (dv *DeviceValidator) getDevToolsDetectionJS() string {
 	if !dv.CheckDevTools {
 		return "// DevTools detection disabled"
 	}
 
 	return `
-            // 方法1: 窗口尺寸差异检测(更严格)
-            const threshold = 100;
+            // 只检测 DevTools 是否真正打开(通过窗口尺寸差异)
+            const threshold = 160;
             const widthDiff = deviceInfo.outerWidth - deviceInfo.innerWidth;
             const heightDiff = deviceInfo.outerHeight - deviceInfo.innerHeight;
             
-            // 检测开发者工具是否打开(任意方向)
             if (widthDiff > threshold || heightDiff > threshold) {
                 isSuspicious = true;
-                reason = '检测到开发者工具已打开 (窗口尺寸差异: ' + Math.max(widthDiff, heightDiff) + 'px)';
-                console.log('DevTools detected via window size:', {widthDiff, heightDiff});
+                reasons.push('开发者工具已打开 (尺寸差: ' + Math.max(widthDiff, heightDiff) + 'px)');
             }
+`
+}
+
+// getFakeMobileDetectionJS 返回伪造移动设备检测 JS 代码
+func (dv *DeviceValidator) getFakeMobileDetectionJS() string {
+	if !dv.CheckFakeMobile {
+		return "// Fake mobile detection disabled"
+	}
+
+	return `
+            const isMobileUA = /Mobile|Android|iPhone|iPad/i.test(deviceInfo.userAgent);
             
-            // 方法2: Devtools-detector library 技术
-            let devtoolsDetected = false;
-            const devtoolsCheck = /./;
-            devtoolsCheck.toString = function() {
-                devtoolsDetected = true;
-                return 'devtools';
-            };
-            console.log('%c', devtoolsCheck);
-            
-            if (devtoolsDetected) {
-                isSuspicious = true;
-                reason = '检测到控制台已打开';
-            }
-            
-            // 方法3: 性能检测(debugger 语句)
-            const start = performance.now();
-            debugger;
-            const end = performance.now();
-            
-            if (end - start > 100) {
-                isSuspicious = true;
-                reason = '检测到调试器 (执行时间: ' + Math.round(end - start) + 'ms)';
-            }
-            
-            // 方法4: Firebug 检测
-            if (window.console && (window.console.firebug || window.console.exception)) {
-                isSuspicious = true;
-                reason = '检测到 Firebug 或开发者工具';
-            }
-            
-            // 方法5: 检测 DevTools 的特征
-            const element = new Image();
-            Object.defineProperty(element, 'id', {
-                get: function() {
+            if (isMobileUA) {
+                // 检查触摸支持
+                if (!deviceInfo.hasTouch || deviceInfo.maxTouchPoints === 0) {
                     isSuspicious = true;
-                    reason = '检测到控制台检查';
-                    throw new Error('DevTools detected');
+                    reasons.push('移动设备UA但无触摸支持');
                 }
-            });
-            
-            try {
-                console.dir(element);
-            } catch(e) {
-                // DevTools detected
+                
+                // 检查屏幕尺寸
+                if (deviceInfo.screenWidth > 768) {
+                    isSuspicious = true;
+                    reasons.push('移动设备UA但屏幕过大 (' + deviceInfo.screenWidth + 'px)');
+                }
             }
+`
+}
+
+// getHeadlessDetectionJS 返回无头浏览器检测 JS 代码
+func (dv *DeviceValidator) getHeadlessDetectionJS() string {
+	if !dv.CheckHeadless {
+		return "// Headless browser detection disabled"
+	}
+
+	return `
+            // 1. WebDriver 检测
+            if (navigator.webdriver === true) {
+                isSuspicious = true;
+                reasons.push('检测到 WebDriver');
+            }
+            
+            // 2. Chrome 特征检测
+            if (typeof window.chrome === 'undefined' && /Chrome/.test(navigator.userAgent)) {
+                isSuspicious = true;
+                reasons.push('Chrome UA 但无 window.chrome 对象');
+            }
+            
+            // 3. Plugins 类型检测
+            if (navigator.plugins && !(navigator.plugins instanceof PluginArray)) {
+                isSuspicious = true;
+                reasons.push('plugins 类型异常');
+            }
+            
+            // 4. 语言检测
+            if (!navigator.languages || navigator.languages.length === 0) {
+                isSuspicious = true;
+                reasons.push('无语言设置');
+            }
+            
+            // 5. Permissions 矛盾检测
+            if (typeof navigator.permissions !== 'undefined') {
+                navigator.permissions.query({name: 'notifications'}).then(function(result) {
+                    if (Notification.permission === 'denied' && result.state === 'prompt') {
+                        isSuspicious = true;
+                        reasons.push('权限状态矛盾');
+                    }
+                }).catch(function() {});
+            }
+            
+            // 6. Phantom 特征检测
+            if (window.callPhantom || window._phantom || window.phantom) {
+                isSuspicious = true;
+                reasons.push('检测到 PhantomJS');
+            }
+            
+            // 7. Selenium 特征检测
+            if (window._Selenium_IDE_Recorder || 
+                window.callSelenium || 
+                window._selenium ||
+                document.__webdriver_script_fn ||
+                document.__selenium_unwrapped ||
+                document.__webdriver_unwrapped) {
+                isSuspicious = true;
+                reasons.push('检测到 Selenium');
+            }
+            
+            // 8. Nightmare 特征检测
+            if (window.__nightmare) {
+                isSuspicious = true;
+                reasons.push('检测到 Nightmare');
+            }
+            
+            // 9. 移动设备加速度计检测
+            const isMobileUA = /Mobile|Android|iPhone|iPad/i.test(deviceInfo.userAgent);
+            if (isMobileUA && typeof DeviceMotionEvent === 'undefined') {
+                isSuspicious = true;
+                reasons.push('移动设备但无加速度计');
+            }
+            
+            // 10. 触摸屏检测(移动设备)
+            if (isMobileUA && deviceInfo.maxTouchPoints === 0) {
+                isSuspicious = true;
+                reasons.push('移动UA但无触摸点');
+            }
+            
+            // 11. 媒体查询检测
+            if (!window.matchMedia('(min-width: ' + (window.innerWidth - 1) + 'px)').matches) {
+                isSuspicious = true;
+                reasons.push('媒体查询异常');
+            }
+            
+            // 12. Sequentum 检测
+            if (window.external && window.external.toString && 
+                window.external.toString().indexOf('Sequentum') > -1) {
+                isSuspicious = true;
+                reasons.push('检测到 Sequentum');
+            }
+            
+            // 13. 视频解码器检测(针对 Chromium)
+            const videoElt = document.createElement("video");
+            if (/Chrome/.test(navigator.userAgent) && 
+                videoElt.canPlayType('video/mp4; codecs="avc1.42E01E"') !== 'probably') {
+                isSuspicious = true;
+                reasons.push('Chrome 但无 H264 解码器');
+            }
+            
+            // 14. 音频解码器检测
+            const audioElt = document.createElement("audio");
+            if (audioElt.canPlayType('audio/mpeg;') !== 'probably') {
+                isSuspicious = true;
+                reasons.push('无 MP3 解码器');
+            }
+            
+            // 15. iframe srcdoc 检测
+            const iframe = document.createElement('iframe');
+            iframe.srcdoc = 'test';
+            iframe.style.display = 'none';
+            document.body.appendChild(iframe);
+            setTimeout(function() {
+                if (typeof iframe.contentWindow.chrome === 'undefined' && /Chrome/.test(navigator.userAgent)) {
+                    isSuspicious = true;
+                    reasons.push('iframe 未正常加载');
+                }
+                iframe.remove();
+            }, 100);
 `
 }
 
@@ -436,12 +531,10 @@ func (dv *DeviceValidator) isValidToken(token, ip string) bool {
 		return false
 	}
 
-	// 检查是否过期
 	if time.Since(data.CreatedAt).Seconds() > float64(dv.TokenExpiry) {
 		return false
 	}
 
-	// 检查 IP 是否匹配 (提取 IP,去除端口)
 	tokenIP := strings.Split(data.IP, ":")[0]
 	requestIP := strings.Split(ip, ":")[0]
 
@@ -498,6 +591,12 @@ func (dv *DeviceValidator) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 				dv.CheckFakeMobile = d.Val() == "true"
 
+			case "check_headless":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				dv.CheckHeadless = d.Val() == "true"
+
 			case "force_verification":
 				if !d.NextArg() {
 					return d.ArgErr()
@@ -508,11 +607,7 @@ func (dv *DeviceValidator) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				var err error
 				fmt.Sscanf(d.Val(), "%d", &dv.TokenExpiry)
-				if err != nil {
-					return d.Errf("invalid token_expiry: %v", err)
-				}
 
 			case "exclude_paths":
 				dv.ExcludePaths = d.RemainingArgs()
