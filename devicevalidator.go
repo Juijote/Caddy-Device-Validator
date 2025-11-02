@@ -153,7 +153,6 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 }
 
 func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Request) {
-	token := dv.generateToken(r.RemoteAddr)
 	message := dv.CustomMessage
 	if message == "" {
 		message = "异常请求"
@@ -166,78 +165,124 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>设备验证</title>
 <style>
+:root {
+  --primary-color: rgba(128, 255, 128, 0.8);
+  --text-shadow-color: rgba(51, 255, 51, 0.4);
+  --background-start: #11581E;
+  --background-end: #041607;
+  --overlay-color: rgba(32, 128, 32, 0.8);
+  --animation-duration: 7.5s;
+  --font-size-base: 16px;
+  --font-size-large: 2rem;
+  --spacing-base: 1rem;
+}
+
+html {
+  min-height: 100%;
+  font-family: "JinzisheTongyuan", system-ui, -apple-system, sans-serif;
+  font-size: var(--font-size-base);
+}
+
 body {
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-	background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	height: 100vh;
+  box-sizing: border-box;
+  height: 100vh;
+  margin: 0;
+  background-color: #000000;
+  background-image: radial-gradient(var(--background-start), var(--background-end));
+  font-size: var(--font-size-large);
+  color: var(--primary-color);
+  text-shadow: 0 0 1ex #33ff33, 0 0 2px rgba(255, 255, 255, 0.8);
+  overflow: hidden;
 }
-.container {
-	background: white;
-	padding: 40px;
-	border-radius: 20px;
-	box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-	text-align: center;
+
+.noise {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: 
+    repeating-radial-gradient(#000 0 0.0001%, #fff 0 0.0002%) 50% 0/2500px 2500px,
+    repeating-conic-gradient(#000 0 0.0001%, #fff 0 0.0002%) 50% 50%/2500px 2500px;
+  background-blend-mode: difference;
+  animation: noise 0.2s infinite alternate;
+  opacity: 0.05;
+  pointer-events: none;
+  z-index: -1;
 }
-.spinner {
-	border: 4px solid #f3f3f3;
-	border-top: 4px solid #667eea;
-	border-radius: 50%%;
-	width: 50px;
-	height: 50px;
-	animation: spin 1s linear infinite;
-	margin: 20px auto;
+
+.overlay {
+  pointer-events: none;
+  position: fixed;
+  width: 100%;
+  height: 100%;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0) 0,
+    rgba(0, 0, 0, 0.3) 50%,
+    rgba(0, 0, 0, 0) 100%
+  );
+  background-size: auto 4px;
+  z-index: 1;
 }
-@keyframes spin {
-	0%% { transform: rotate(0deg); }
-	100%% { transform: rotate(360deg); }
+
+.overlay::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  display: block;
+  inset: 0;
+  background-image: linear-gradient(
+    0deg,
+    transparent 0%,
+    var(--overlay-color) 2%,
+    var(--overlay-color) 3%,
+    transparent 100%
+  );
+  background-repeat: no-repeat;
+  animation: scan var(--animation-duration) linear infinite;
+}
+
+.terminal {
+  position: relative;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: calc(var(--spacing-base) * 4);
+  text-align: center;
+}
+
+.errorcode {
+  color: white;
+  font-size: calc(var(--font-size-large) * 1.5);
+  font-weight: bold;
+}
+
+@keyframes scan {
+  0% { background-position: 0 -100vh; }
+  35%, 100% { background-position: 0 100vh; }
+}
+
+@keyframes noise {
+  0% { transform: translate(0, 0); }
+  100% { transform: translate(1px, 1px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .noise, .overlay::before { animation: none; }
 }
 </style>
 </head>
 <body>
-<div class="container">
-<h2>正在验证设备</h2>
-<div class="spinner"></div>
-<p>请稍候...</p>
-<div id="debug" style="display:none;"></div>
-</div>
-<script>
-(function() {
-	let isSuspicious = false;
-	let reasons = [];
+<div class="noise" aria-hidden="true"></div>
+<div class="overlay" aria-hidden="true"></div>
 
-	const info = {
-		ua: navigator.userAgent,
-		hasTouch: 'ontouchstart' in window || navigator.maxTouchPoints > 0,
-		maxTouchPoints: navigator.maxTouchPoints || 0
-	};
-
-	// 模拟移动设备但无触控能力 → 伪造
-	if (/Mobile|Android|iPhone|iPad/i.test(info.ua) && info.maxTouchPoints <= 1) {
-		isSuspicious = true;
-		reasons.push('移动 UA 但触控点 ≤ 1，疑似 F12 模拟设备');
-	}
-
-	// 无头浏览器检测
-	if (navigator.webdriver === true) {
-		isSuspicious = true;
-		reasons.push('检测到 WebDriver 环境');
-	}
-
-	if (isSuspicious) {
-		document.body.innerHTML = '<div class="container"><h2>异常请求</h2><p>%s</p></div>';
-	} else {
-		document.cookie = 'device_verified=1; path=/; max-age=300; SameSite=Lax';
-		const url = new URL(window.location.href);
-		url.searchParams.set('_vt', '%s');
-		setTimeout(() => { window.location.href = url.toString(); }, 500);
-	}
-})();
-</script>
+<main class="terminal">
+  <div class="error-container" role="alert" aria-live="polite">
+    <h1><span class="errorcode">%s</span></h1>
+  </div>
+</main>
 </body>
-</html>`, message, token)
+</html>`, message)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
