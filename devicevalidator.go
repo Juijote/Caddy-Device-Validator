@@ -27,12 +27,13 @@ func init() {
 // DeviceValidator 实现设备验证中间件
 type DeviceValidator struct {
 	// 配置项
-	Enable          bool     `json:"enable,omitempty"`
-	CheckDevTools   bool     `json:"check_devtools,omitempty"`
-	CheckFakeMobile bool     `json:"check_fake_mobile,omitempty"`
-	TokenExpiry     int      `json:"token_expiry,omitempty"` // 秒
-	ExcludePaths    []string `json:"exclude_paths,omitempty"`
-	CustomMessage   string   `json:"custom_message,omitempty"`
+	Enable           bool     `json:"enable,omitempty"`
+	CheckDevTools    bool     `json:"check_devtools,omitempty"`
+	CheckFakeMobile  bool     `json:"check_fake_mobile,omitempty"`
+	ForceVerification bool     `json:"force_verification,omitempty"` // 强制所有请求先验证
+	TokenExpiry      int      `json:"token_expiry,omitempty"`        // 秒
+	ExcludePaths     []string `json:"exclude_paths,omitempty"`
+	CustomMessage    string   `json:"custom_message,omitempty"`
 
 	// 运行时数据
 	tokens     map[string]*tokenData
@@ -104,6 +105,19 @@ func (dv *DeviceValidator) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 		return next.ServeHTTP(w, r)
 	}
 
+	// 如果开启强制验证模式,所有请求都需要验证
+	if dv.ForceVerification {
+		// 检查是否有验证 cookie
+		cookie, err := r.Cookie("device_verified")
+		if err != nil || cookie.Value != "1" {
+			dv.logger.Info("force verification mode, showing validation page",
+				zap.String("path", r.URL.Path),
+				zap.String("ua", r.Header.Get("User-Agent")))
+			dv.serveValidationPage(w, r)
+			return nil
+		}
+	}
+
 	// 检查设备是否可疑
 	if dv.isSuspiciousDevice(r) {
 		// 返回验证页面
@@ -122,8 +136,45 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 	// 检查是否为移动设备 UA
 	isMobileUA := dv.mobileRegex.MatchString(userAgent)
 
-	if !isMobileUA {
+	if !isMobileUA && !dv.CheckDevTools {
+		// 如果不是移动设备 UA,且不检测 DevTools,直接返回
 		return false
+	}
+
+	// 如果是移动设备 UA,强制显示验证页面让 JS 检测
+	if dv.CheckFakeMobile && isMobileUA {
+		// 检查是否已经通过验证
+		cookie, err := r.Cookie("device_verified")
+		if err == nil && cookie.Value == "1" {
+			// 已验证,检查屏幕宽度
+			if widthCookie, err := r.Cookie("screen_width"); err == nil {
+				var width int
+				fmt.Sscanf(widthCookie.Value, "%d", &width)
+				if width <= 768 {
+					// 屏幕宽度正常,放行
+					return false
+				}
+			} else {
+				// 有验证 cookie 但没有屏幕宽度,放行(可能是第一次)
+				return false
+			}
+		}
+		
+		// 需要验证
+		dv.logger.Info("mobile UA detected, need verification",
+			zap.String("ua", userAgent))
+		return true
+	}
+
+	// 如果开启了 DevTools 检测,所有请求都需要验证
+	if dv.CheckDevTools {
+		cookie, err := r.Cookie("device_verified")
+		if err == nil && cookie.Value == "1" {
+			return false
+		}
+		dv.logger.Info("devtools check enabled, need verification",
+			zap.String("ua", userAgent))
+		return true
 	}
 
 	// 检查 Client Hints (现代浏览器支持)
@@ -132,7 +183,7 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 		secChUaPlatform := r.Header.Get("Sec-CH-UA-Platform")
 
 		// 如果声称是移动设备但 Client Hints 说不是
-		if secChUaMobile == "?0" {
+		if secChUaMobile == "?0" && isMobileUA {
 			dv.logger.Info("detected fake mobile device via Client Hints",
 				zap.String("ua", userAgent),
 				zap.String("sec-ch-ua-mobile", secChUaMobile))
@@ -150,18 +201,6 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 					zap.String("platform", secChUaPlatform))
 				return true
 			}
-		}
-	}
-
-	// 检查 cookie 中的屏幕宽度信息
-	if cookie, err := r.Cookie("screen_width"); err == nil {
-		var width int
-		fmt.Sscanf(cookie.Value, "%d", &width)
-		if width > 768 && isMobileUA {
-			dv.logger.Info("detected large screen with mobile UA",
-				zap.String("ua", userAgent),
-				zap.Int("screen_width", width))
-			return true
 		}
 	}
 
@@ -310,35 +349,63 @@ func (dv *DeviceValidator) getDevToolsDetectionJS() string {
 	}
 
 	return `
-            // 方法1: 窗口尺寸差异检测
-            const threshold = 160;
+            // 方法1: 窗口尺寸差异检测(更严格)
+            const threshold = 100;
             const widthDiff = deviceInfo.outerWidth - deviceInfo.innerWidth;
             const heightDiff = deviceInfo.outerHeight - deviceInfo.innerHeight;
             
+            // 检测开发者工具是否打开(任意方向)
             if (widthDiff > threshold || heightDiff > threshold) {
                 isSuspicious = true;
-                reason = '检测到开发者工具';
+                reason = '检测到开发者工具已打开 (窗口尺寸差异: ' + Math.max(widthDiff, heightDiff) + 'px)';
+                console.log('DevTools detected via window size:', {widthDiff, heightDiff});
             }
             
-            // 方法2: 时间差异检测
+            // 方法2: Devtools-detector library 技术
+            let devtoolsDetected = false;
+            const devtoolsCheck = /./;
+            devtoolsCheck.toString = function() {
+                devtoolsDetected = true;
+                return 'devtools';
+            };
+            console.log('%c', devtoolsCheck);
+            
+            if (devtoolsDetected) {
+                isSuspicious = true;
+                reason = '检测到控制台已打开';
+            }
+            
+            // 方法3: 性能检测(debugger 语句)
             const start = performance.now();
             debugger;
             const end = performance.now();
             
             if (end - start > 100) {
                 isSuspicious = true;
-                reason = '检测到调试器';
+                reason = '检测到调试器 (执行时间: ' + Math.round(end - start) + 'ms)';
             }
             
-            // 方法3: 控制台检测
+            // 方法4: Firebug 检测
+            if (window.console && (window.console.firebug || window.console.exception)) {
+                isSuspicious = true;
+                reason = '检测到 Firebug 或开发者工具';
+            }
+            
+            // 方法5: 检测 DevTools 的特征
             const element = new Image();
             Object.defineProperty(element, 'id', {
                 get: function() {
                     isSuspicious = true;
-                    reason = '检测到控制台';
+                    reason = '检测到控制台检查';
+                    throw new Error('DevTools detected');
                 }
             });
-            console.log('%c', element);
+            
+            try {
+                console.dir(element);
+            } catch(e) {
+                // DevTools detected
+            }
 `
 }
 
@@ -430,6 +497,12 @@ func (dv *DeviceValidator) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				dv.CheckFakeMobile = d.Val() == "true"
+
+			case "force_verification":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				dv.ForceVerification = d.Val() == "true"
 
 			case "token_expiry":
 				if !d.NextArg() {
