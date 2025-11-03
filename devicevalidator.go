@@ -168,10 +168,14 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Request) {
 	token := dv.generateToken(r.RemoteAddr, r.Header.Get("User-Agent"))
 
-	// 构造验证后的回调 URL
+	// 构造验证后的回调 URL，先清理已存在的验证参数
+	query := r.URL.Query()
+	query.Del("dv_verified")
+	query.Del("token")
+	
 	callbackURL := r.URL.Path
-	if r.URL.RawQuery != "" {
-		callbackURL += "?" + r.URL.RawQuery + "&dv_verified=1&token=" + token
+	if len(query) > 0 {
+		callbackURL += "?" + query.Encode() + "&dv_verified=1&token=" + token
 	} else {
 		callbackURL += "?dv_verified=1&token=" + token
 	}
