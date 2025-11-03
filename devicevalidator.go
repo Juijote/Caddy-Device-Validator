@@ -3,7 +3,6 @@ package devicevalidator
 
 import (
 	"bytes"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
