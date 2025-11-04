@@ -3,14 +3,9 @@
 package devicevalidator
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"regexp"
-	"strings"
-	"sync"
-	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -26,23 +21,11 @@ func init() {
 
 // DeviceValidatorHeader 实现设备验证请求头中间件
 type DeviceValidatorHeader struct {
-	SessionExpiry int      `json:"session_expiry,omitempty"`
-	ExcludePaths  []string `json:"exclude_paths,omitempty"`
+	ExcludePaths []string `json:"exclude_paths,omitempty"`
 
-	sessions     map[string]*sessionData
-	sessionsLock sync.RWMutex
 	logger       *zap.Logger
 	mobileRegex  *regexp.Regexp
 	excludeRegex []*regexp.Regexp
-}
-
-type sessionData struct {
-	IP           string
-	CreatedAt    time.Time
-	TouchPoints  string
-	HasTouch     string
-	IsFakeMobile bool
-	Verified     bool
 }
 
 // CaddyModule returns the Caddy module information.
@@ -56,12 +39,6 @@ func (DeviceValidatorHeader) CaddyModule() caddy.ModuleInfo {
 // Provision implements caddy.Provisioner.
 func (dv *DeviceValidatorHeader) Provision(ctx caddy.Context) error {
 	dv.logger = ctx.Logger()
-	dv.sessions = make(map[string]*sessionData)
-
-	if dv.SessionExpiry == 0 {
-		dv.SessionExpiry = 300
-	}
-
 	dv.mobileRegex = regexp.MustCompile(`(?i)Mobile`)
 
 	for _, pattern := range dv.ExcludePaths {
@@ -72,7 +49,6 @@ func (dv *DeviceValidatorHeader) Provision(ctx caddy.Context) error {
 		dv.excludeRegex = append(dv.excludeRegex, re)
 	}
 
-	go dv.cleanupExpiredSessions()
 	return nil
 }
 
@@ -96,57 +72,26 @@ func (dv *DeviceValidatorHeader) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return next.ServeHTTP(w, r)
 	}
 
-	clientIP := strings.Split(r.RemoteAddr, ":")[0]
-	sessionKey := dv.getSessionKey(clientIP)
-
 	// 检查是否是验证提交请求
 	if r.Method == "POST" && r.Header.Get("X-Device-Validation") == "submit" {
 		touchPoints := r.FormValue("touch_points")
 		hasTouch := r.FormValue("has_touch")
 
-		// 创建或更新会话
-		dv.sessionsLock.Lock()
+		// 判断是否为伪造移动设备
 		isFake := touchPoints == "0" || touchPoints == "1" || hasTouch == "false"
-		dv.sessions[sessionKey] = &sessionData{
-			IP:           clientIP,
-			CreatedAt:    time.Now(),
-			TouchPoints:  touchPoints,
-			HasTouch:     hasTouch,
-			IsFakeMobile: isFake,
-			Verified:     true,
-		}
-		dv.sessionsLock.Unlock()
 
-		// 返回成功响应
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
-		return nil
-	}
+		// 添加请求头
+		r.Header.Set("X-Device-Touch-Points", touchPoints)
+		r.Header.Set("X-Device-Has-Touch", hasTouch)
+		r.Header.Set("X-Device-Is-Fake-Mobile", fmt.Sprintf("%t", isFake))
 
-	// 检查是否已验证
-	dv.sessionsLock.RLock()
-	session, exists := dv.sessions[sessionKey]
-	dv.sessionsLock.RUnlock()
-
-	if exists && session.Verified && time.Since(session.CreatedAt).Seconds() <= float64(dv.SessionExpiry) {
-		// 已验证,添加请求头(仅内部使用,不会发送给客户端)
-		r.Header.Set("X-Device-Touch-Points", session.TouchPoints)
-		r.Header.Set("X-Device-Has-Touch", session.HasTouch)
-		r.Header.Set("X-Device-Is-Fake-Mobile", fmt.Sprintf("%t", session.IsFakeMobile))
+		// 继续处理请求
 		return next.ServeHTTP(w, r)
 	}
 
-	// 未验证,显示验证页面
+	// 首次访问或非POST请求,显示验证页面
 	dv.serveValidationPage(w, r)
 	return nil
-}
-
-// getSessionKey 生成会话密钥
-func (dv *DeviceValidatorHeader) getSessionKey(ip string) string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return ip + "_" + hex.EncodeToString(b)[:8]
 }
 
 // serveValidationPage 显示验证页面
@@ -156,7 +101,7 @@ func (dv *DeviceValidatorHeader) serveValidationPage(w http.ResponseWriter, r *h
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>访问</title>
+<title>设备验证</title>
 <style>
 body{margin:0;height:100vh;font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;background-color:#000;background-image:radial-gradient(#11581E,#041607);color:#80ff80;text-shadow:0 0 2px #33ff33,0 0 1px #33ff33;display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:1.5rem;}
 .noise{position:fixed;top:0;left:0;width:100%;height:100%;background:repeating-radial-gradient(#000 0 0.0001%,#fff 0 0.0002%) 50% 0/2000px 2000px,repeating-conic-gradient(#000 0 0.0001%,#fff 0 0.0002%) 50% 50%/2000px 2000px;background-blend-mode:difference;animation:noise .3s infinite alternate;opacity:.03;pointer-events:none;z-index:-1;}
@@ -178,7 +123,7 @@ body{margin:0;height:100vh;font-family:system-ui,-apple-system,BlinkMacSystemFon
 (function(){
 const terminal=document.getElementById("terminal");
 const info={hasTouch:'ontouchstart' in window||navigator.maxTouchPoints>0,maxTouchPoints:navigator.maxTouchPoints||0};
-const text="访问中...";
+const text="设备验证中...";
 const cursor=document.createElement("span");
 cursor.className="cursor";
 cursor.textContent=" ";
@@ -189,10 +134,10 @@ function submit(){
 const formData=new FormData();
 formData.append("touch_points",info.maxTouchPoints);
 formData.append("has_touch",info.hasTouch);
-fetch(window.location.href,{method:"POST",headers:{"X-Device-Validation":"submit"},body:formData})
-.then(r=>r.json())
-.then(()=>window.location.reload())
-.catch(()=>window.location.reload());
+const currentURL=new URL(window.location.href);
+fetch(currentURL.pathname+currentURL.search,{method:"POST",headers:{"X-Device-Validation":"submit"},body:formData})
+.then(()=>window.location.href=currentURL.pathname+currentURL.search)
+.catch(()=>window.location.href=currentURL.pathname+currentURL.search);
 }
 type();
 })();
@@ -215,33 +160,11 @@ func (dv *DeviceValidatorHeader) isExcludedPath(path string) bool {
 	return false
 }
 
-// cleanupExpiredSessions 清理过期会话
-func (dv *DeviceValidatorHeader) cleanupExpiredSessions() {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-	for range ticker.C {
-		dv.sessionsLock.Lock()
-		now := time.Now()
-		for key, session := range dv.sessions {
-			if now.Sub(session.CreatedAt).Seconds() > float64(dv.SessionExpiry) {
-				delete(dv.sessions, key)
-			}
-		}
-		dv.sessionsLock.Unlock()
-	}
-}
-
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
 func (dv *DeviceValidatorHeader) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
 		for d.NextBlock(0) {
 			switch d.Val() {
-			case "session_expiry":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				fmt.Sscanf(d.Val(), "%d", &dv.SessionExpiry)
-
 			case "exclude_paths":
 				dv.ExcludePaths = d.RemainingArgs()
 
