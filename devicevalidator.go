@@ -82,9 +82,10 @@ func (dv *DeviceValidatorHeader) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		r.Header.Set("X-Device-Is-Fake-Mobile", fmt.Sprintf("%t", isFake))
 
 		dv.logger.Debug("device validated",
-			"touch_points", touchPoints,
-			"has_touch", hasTouch,
-			"is_fake", isFake)
+			zap.String("touch_points", touchPoints),
+			zap.String("has_touch", hasTouch),
+			zap.Bool("is_fake", isFake),
+		)
 
 		return next.ServeHTTP(w, r)
 	}
