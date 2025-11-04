@@ -22,7 +22,8 @@ func init() {
 
 // DeviceValidatorHeader 实现设备验证请求头中间件
 type DeviceValidatorHeader struct {
-	ExcludePaths []string `json:"exclude_paths,omitempty"`
+	ExcludePaths     []string `json:"exclude_paths,omitempty"`
+	AllowUASubstring []string `json:"allow_ua_keywords,omitempty"`
 
 	logger       *zap.Logger
 	mobileRegex  *regexp.Regexp
@@ -73,31 +74,38 @@ func (dv *DeviceValidatorHeader) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return next.ServeHTTP(w, r)
 	}
 
-	// 检查 Cookie 中的验证数据
+	// ① UA 白名单检测
+	for _, keyword := range dv.AllowUASubstring {
+		if strings.Contains(strings.ToLower(userAgent), strings.ToLower(keyword)) {
+			r.Header.Set("X-Device-Is-Fake-Mobile", "true")
+			dv.logger.Debug("allowed UA bypassed validation",
+				zap.String("ua", userAgent),
+				zap.String("keyword", keyword))
+			return next.ServeHTTP(w, r)
+		}
+	}
+
+	// ② 检查 Cookie 中的验证数据
 	cookie, err := r.Cookie("_dv_data")
 	if err == nil && cookie.Value != "" {
-		// 解析 Cookie: touchPoints|hasTouch
 		parts := strings.Split(cookie.Value, "|")
 		if len(parts) == 2 {
 			touchPoints := parts[0]
 			hasTouch := parts[1]
 			isFake := touchPoints == "0" || touchPoints == "1" || hasTouch == "false"
 
-			// 添加请求头
 			r.Header.Set("X-Device-Touch-Points", touchPoints)
 			r.Header.Set("X-Device-Has-Touch", hasTouch)
 			r.Header.Set("X-Device-Is-Fake-Mobile", fmt.Sprintf("%t", isFake))
-
 			return next.ServeHTTP(w, r)
 		}
 	}
 
-	// 检查是否是带验证数据的请求（从验证页面提交的）
+	// ③ 检查是否是验证请求
 	touchPoints := r.Header.Get("X-Device-Touch-Points")
 	hasTouch := r.Header.Get("X-Device-Has-Touch")
 
 	if touchPoints != "" && hasTouch != "" {
-		// 设置 Cookie（Session Cookie，浏览器关闭后失效）
 		cookieValue := touchPoints + "|" + hasTouch
 		http.SetCookie(w, &http.Cookie{
 			Name:     "_dv_data",
@@ -120,7 +128,7 @@ func (dv *DeviceValidatorHeader) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return next.ServeHTTP(w, r)
 	}
 
-	// 没有验证数据，显示验证页面
+	// ④ 没有验证数据，显示验证页面
 	dv.serveValidationPage(w, r)
 	return nil
 }
@@ -179,7 +187,6 @@ type();
 </script>
 </body>
 </html>`
-
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(html))
@@ -202,7 +209,8 @@ func (dv *DeviceValidatorHeader) UnmarshalCaddyfile(d *caddyfile.Dispenser) erro
 			switch d.Val() {
 			case "exclude_paths":
 				dv.ExcludePaths = d.RemainingArgs()
-
+			case "allow_ua_keywords":
+				dv.AllowUASubstring = d.RemainingArgs()
 			default:
 				return d.Errf("unknown subdirective: %s", d.Val())
 			}
