@@ -72,24 +72,24 @@ func (dv *DeviceValidatorHeader) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return next.ServeHTTP(w, r)
 	}
 
-	// 检查是否是验证提交请求
-	if r.Method == "POST" && r.Header.Get("X-Device-Validation") == "submit" {
-		touchPoints := r.FormValue("touch_points")
-		hasTouch := r.FormValue("has_touch")
+	// 检查是否是带验证数据的请求（从验证页面提交的）
+	touchPoints := r.Header.Get("X-Device-Touch-Points")
+	hasTouch := r.Header.Get("X-Device-Has-Touch")
 
-		// 判断是否为伪造移动设备
+	if touchPoints != "" && hasTouch != "" {
+		// 已有验证数据，判断是否为伪造移动设备
 		isFake := touchPoints == "0" || touchPoints == "1" || hasTouch == "false"
-
-		// 添加请求头
-		r.Header.Set("X-Device-Touch-Points", touchPoints)
-		r.Header.Set("X-Device-Has-Touch", hasTouch)
 		r.Header.Set("X-Device-Is-Fake-Mobile", fmt.Sprintf("%t", isFake))
 
-		// 继续处理请求
+		dv.logger.Debug("device validated",
+			"touch_points", touchPoints,
+			"has_touch", hasTouch,
+			"is_fake", isFake)
+
 		return next.ServeHTTP(w, r)
 	}
 
-	// 首次访问或非POST请求,显示验证页面
+	// 没有验证数据，显示验证页面
 	dv.serveValidationPage(w, r)
 	return nil
 }
@@ -129,15 +129,19 @@ cursor.className="cursor";
 cursor.textContent=" ";
 terminal.appendChild(cursor);
 let i=0;
-function type(){if(i<text.length){cursor.insertAdjacentText("beforebegin",text[i]);i++;setTimeout(type,80);}else{setTimeout(submit,500);}}
-function submit(){
-const formData=new FormData();
-formData.append("touch_points",info.maxTouchPoints);
-formData.append("has_touch",info.hasTouch);
-const currentURL=new URL(window.location.href);
-fetch(currentURL.pathname+currentURL.search,{method:"POST",headers:{"X-Device-Validation":"submit"},body:formData})
-.then(()=>window.location.href=currentURL.pathname+currentURL.search)
-.catch(()=>window.location.href=currentURL.pathname+currentURL.search);
+function type(){if(i<text.length){cursor.insertAdjacentText("beforebegin",text[i]);i++;setTimeout(type,80);}else{setTimeout(redirect,500);}}
+function redirect(){
+fetch(window.location.href,{
+method:"GET",
+headers:{
+"X-Device-Touch-Points":String(info.maxTouchPoints),
+"X-Device-Has-Touch":String(info.hasTouch)
+}
+}).then(r=>r.text()).then(html=>{
+document.open();
+document.write(html);
+document.close();
+}).catch(()=>window.location.reload());
 }
 type();
 })();
